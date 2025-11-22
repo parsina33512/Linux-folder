@@ -1,0 +1,86 @@
+#!/bin/bash
+
+START_TIME=$(date +%s)
+set -e
+
+GREEN="\e[32m"; RED="\e[31m"; YELLOW="\e[33m"; BLUE="\e[34m"; RESET="\e[0m"
+
+echo -e "${BLUE}=== Starting project setup ===${RESET}"
+
+sudo -v
+
+PROJECT_DIR="$HOME/my_web_project"
+TIMESTAMP=$(date +%Y%m%d_%H%M)
+
+mkdir -p $PROJECT_DIR/{html,css,js,logs,backup}
+cd $PROJECT_DIR
+
+echo -e "${YELLOW}→ Creating project files${RESET}"
+
+cat > html/index.html <<EOF
+<!DOCTYPE html>
+<html>
+<head>
+<title>My Project</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<h1>Welcome to My Web Project</h1>
+<p>Server time: <span id="time"></span></p>
+<script src="../js/script.js"></script>
+</body>
+</html>
+EOF
+
+cat > css/style.css <<EOF
+body { font-family: Arial, sans-serif; margin: 40px; }
+h1 { color: #2E86C1; }
+EOF
+
+echo "document.getElementById('time').textContent = new Date().toLocaleString();" > js/script.js
+
+echo -e "${YELLOW}→ Installing nginx if needed...${RESET}"
+sudo dnf install -y nginx
+
+echo -e "${YELLOW}→ Deploying website to nginx directory${RESET}"
+sudo cp -r html/* /usr/share/nginx/html/
+sudo systemctl enable nginx
+sudo systemctl restart nginx
+
+echo -e "${YELLOW}→ Running stability checks${RESET}"
+HTTP_STATUS=$(curl -Is http://localhost | head -n 1)
+
+if [[ $HTTP_STATUS == *"200"* ]]; then
+    echo -e "${GREEN}✔ Website is reachable${RESET}"
+else
+    echo -e "${RED}✘ Website check failed${RESET}"
+fi
+
+NGINX_STATUS=$(systemctl is-active nginx)
+echo "Nginx status: $NGINX_STATUS"
+
+echo -e "${YELLOW}→ Creating backup${RESET}"
+tar -czf backup/web_project_$TIMESTAMP.tar.gz html css js
+
+echo -e "${YELLOW}→ Generating report${RESET}"
+IP_ADDR=$(hostname -I | awk '{print $1}')
+
+cat > project_report.txt <<EOF
+=== Project Status Report ===
+Date: $(date)
+Hostname: $(hostname)
+Server IP: $IP_ADDR
+Website URL: http://$IP_ADDR
+Project size: $(du -sh .)
+Files count: $(find . -type f | wc -l)
+Nginx status: $(systemctl is-active nginx)
+Backup file: backup/web_project_$TIMESTAMP.tar.gz
+EOF
+
+END_TIME=$(date +%s)
+EXEC_TIME=$((END_TIME - START_TIME))
+
+echo -e "${GREEN}=== Completed successfully 🎉 ===${RESET}"
+echo -e "${BLUE}Execution time: ${EXEC_TIME}s${RESET}"
+echo -e "${BLUE}Website available at: ${YELLOW}http://$IP_ADDR${RESET}"
+echo -e "${BLUE}Full report saved to: ${YELLOW}$PROJECT_DIR/project_report.txt${RESET}"

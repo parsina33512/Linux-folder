@@ -1,0 +1,556 @@
+پروژه: راه‌اندازی سرور مانیتورینگ و دیده‌بانی با Alerting System
+فاز ۱: راه‌اندازی پایه و نصب prerequisites
+bash
+#!/bin/bash
+
+# به روزرسانی کامل سیستم
+echo "=== به روزرسانی سیستم ==="
+sudo dnf update -y
+sudo dnf upgrade -y
+
+# نصب پیش‌نیازها
+echo "=== نصب پیش‌نیازها ==="
+sudo dnf install -y wget curl tar vim git make gcc openssl-devel \
+    bzip2-devel libffi-devel zlib-devel java-11-openjdk python3-pip
+
+# بررسی نسخه‌ها
+echo "=== بررسی نسخه‌ها ==="
+python3 --version
+java --version
+git --version
+فاز ۲: راه‌اندازی Prometheus برای جمع‌آوری متریک‌ها
+bash
+# ایجاد کاربر مخصوص سرویس‌های مانیتورینگ
+echo "=== ایجاد کاربر سرویس ==="
+sudo useradd -r -s /bin/false prometheus
+sudo useradd -r -s /bin/false node_exporter
+
+# ایجاد دایرکتوری‌های مورد نیاز
+echo "=== ایجاد ساختار دایرکتوری ==="
+sudo mkdir -p /opt/monitoring/{prometheus,node_exporter,alertmanager,grafana}
+sudo mkdir -p /var/lib/prometheus/data
+sudo chown -R prometheus:prometheus /var/lib/prometheus
+sudo chown -R prometheus:prometheus /opt/monitoring/prometheus
+
+# دانلود و نصب Prometheus
+echo "=== نصب Prometheus ==="
+cd /tmp
+PROM_VERSION="2.47.0"
+wget https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz
+tar xvf prometheus-${PROM_VERSION}.linux-amd64.tar.gz
+cd prometheus-${PROM_VERSION}.linux-amd64
+
+# کپی فایل‌های باینری
+sudo cp prometheus promtool /usr/local/bin/
+sudo cp prometheus promtool /opt/monitoring/prometheus/
+
+# تنظیم مالکیت
+sudo chown prometheus:prometheus /usr/local/bin/prometheus
+sudo chown prometheus:prometheus /usr/local/bin/promtool
+sudo chown -R prometheus:prometheus /opt/monitoring/prometheus/
+
+# ایجاد فایل پیکربندی Prometheus
+echo "=== ایجاد پیکربندی Prometheus ==="
+sudo tee /etc/prometheus.yml > /dev/null <<'EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "/etc/prometheus/rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - localhost:9093
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+
+  - job_name: 'web_servers'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'custom_app'
+    static_configs:
+      - targets: ['localhost:8000']
+EOF
+
+# ایجاد قوانین Alert
+echo "=== ایجاد قوانین هشدار ==="
+sudo tee /etc/prometheus/rules.yml > /dev/null <<'EOF'
+groups:
+- name: node_rules
+  rules:
+  - alert: HighNodeCPU
+    expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High CPU usage on {{ $labels.instance }}"
+      description: "CPU usage is above 80% for more than 5 minutes."
+
+  - alert: HighNodeMemory
+    expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High memory usage on {{ $labels.instance }}"
+      description: "Memory usage is above 85% for more than 5 minutes."
+
+  - alert: NodeDown
+    expr: up == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Node {{ $labels.instance }} is down"
+      description: "Node has been down for more than 2 minutes."
+EOF
+
+sudo chown prometheus:prometheus /etc/prometheus.yml
+sudo chown prometheus:prometheus /etc/prometheus/rules.yml
+فاز ۳: راه‌اندازی Node Exporter
+bash
+# دانلود و نصب Node Exporter
+echo "=== نصب Node Exporter ==="
+cd /tmp
+NODE_EXPORTER_VERSION="1.6.1"
+wget https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
+tar xvf node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
+cd node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64
+
+sudo cp node_exporter /usr/local/bin/
+sudo cp node_exporter /opt/monitoring/node_exporter/
+sudo chown node_exporter:node_exporter /usr/local/bin/node_exporter
+sudo chown -R node_exporter:node_exporter /opt/monitoring/node_exporter/
+فاز ۴: راه‌اندازی Alertmanager
+bash
+# دانلود و نصب Alertmanager
+echo "=== نصب Alertmanager ==="
+cd /tmp
+ALERTMANAGER_VERSION="0.25.0"
+wget https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz
+tar xvf alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz
+cd alertmanager-${ALERTMANAGER_VERSION}.linux-amd64
+
+sudo cp alertmanager amtool /usr/local/bin/
+sudo cp alertmanager amtool /opt/monitoring/alertmanager/
+sudo chown prometheus:prometheus /usr/local/bin/alertmanager
+sudo chown prometheus:prometheus /usr/local/bin/amtool
+
+# ایجاد پیکربندی Alertmanager
+echo "=== ایجاد پیکربندی Alertmanager ==="
+sudo tee /etc/alertmanager.yml > /dev/null <<'EOF'
+global:
+  smtp_smarthost: 'localhost:587'
+  smtp_from: 'alertmanager@example.com'
+  smtp_auth_username: 'admin'
+  smtp_auth_password: 'password'
+
+route:
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'web.hook'
+
+receivers:
+  - name: 'web.hook'
+    webhook_configs:
+      - url: 'http://localhost:5001/'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'dev', 'instance']
+EOF
+
+sudo chown prometheus:prometheus /etc/alertmanager.yml
+فاز ۵: ایجاد سرویس‌های Systemd
+bash
+# ایجاد سرویس Prometheus
+echo "=== ایجاد سرویس Systemd برای Prometheus ==="
+sudo tee /etc/systemd/system/prometheus.service > /dev/null <<'EOF'
+[Unit]
+Description=Prometheus Time Series Collection and Processing Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+    --config.file /etc/prometheus.yml \
+    --storage.tsdb.path /var/lib/prometheus/data \
+    --web.console.templates=/etc/prometheus/consoles \
+    --web.console.libraries=/etc/prometheus/console_libraries \
+    --web.listen-address=0.0.0.0:9090 \
+    --web.external-url=
+
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=20s
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ایجاد سرویس Node Exporter
+echo "=== ایجاد سرویس Systemd برای Node Exporter ==="
+sudo tee /etc/systemd/system/node_exporter.service > /dev/null <<'EOF'
+[Unit]
+Description=Node Exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter \
+    --collector.systemd \
+    --collector.processes \
+    --collector.tcpstat
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ایجاد سرویس Alertmanager
+echo "=== ایجاد سرویس Systemd برای Alertmanager ==="
+sudo tee /etc/systemd/system/alertmanager.service > /dev/null <<'DEVNULL'
+[Unit]
+Description=Alertmanager Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/alertmanager \
+    --config.file /etc/alertmanager.yml \
+    --storage.path /var/lib/prometheus/alertmanager \
+    --web.listen-address=0.0.0.0:9093 \
+    --cluster.listen-address=0.0.0.0:9094
+
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=20s
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+DEVNULL
+فاز ۶: راه‌اندازی Grafana
+bash
+# نصب Grafana
+echo "=== نصب Grafana ==="
+sudo tee /etc/yum.repos.d/grafana.repo > /dev/null <<'EOF'
+[grafana]
+name=grafana
+baseurl=https://packages.grafana.com/oss/rpm
+repo_gpgcheck=1
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.grafana.com/gpg.key
+sslverify=1
+sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+EOF
+
+sudo dnf install -y grafana
+
+# ایجاد دشبوردهای پیش‌فرض
+echo "=== ایجاد دشبوردهای سفارشی ==="
+sudo mkdir -p /etc/grafana/provisioning/dashboards
+sudo mkdir -p /etc/grafana/provisioning/datasources
+
+# ایجاد دشبورد برای مانیتورینگ سیستم
+sudo tee /etc/grafana/provisioning/dashboards/system.yaml > /dev/null <<'EOF'
+apiVersion: 1
+
+providers:
+  - name: 'default'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+EOF
+
+# ایجاد منبع داده Prometheus
+sudo tee /etc/grafana/provisioning/datasources/prometheus.yaml > /dev/null <<'EOF'
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: true
+EOF
+فاز ۷: ایجاد برنامه تست برای تولید متریک
+bash
+# ایجاد برنامه Python برای تولید متریک‌های سفارشی
+echo "=== ایجاد برنامه تست متریک ==="
+sudo tee /opt/monitoring/custom_metrics/app.py > /dev/null <<'EOF'
+from prometheus_client import start_http_server, Counter, Gauge, Histogram
+import random
+import time
+import threading
+
+# تعریف متریک‌ها
+REQUEST_COUNT = Counter('http_requests_total', 'Total HTTP Requests', ['method', 'endpoint'])
+REQUEST_DURATION = Histogram('http_request_duration_seconds', 'HTTP request duration in seconds')
+ACTIVE_USERS = Gauge('active_users', 'Number of active users')
+ERROR_COUNT = Counter('http_errors_total', 'Total HTTP Errors', ['type'])
+TEMPERATURE = Gauge('system_temperature_celsius', 'System temperature simulation')
+
+def simulate_requests():
+    endpoints = ['/api/v1/users', '/api/v1/products', '/api/v1/orders', '/health']
+    methods = ['GET', 'POST', 'PUT', 'DELETE']
+    
+    while True:
+        endpoint = random.choice(endpoints)
+        method = random.choice(methods)
+        
+        # شبیه‌سازی مدت زمان درخواست
+        with REQUEST_DURATION.time():
+            time.sleep(random.uniform(0.01, 0.5))
+            
+            # شبیه‌سازی خطا (5% شانس خطا)
+            if random.random() < 0.05:
+                ERROR_COUNT.labels(type='500').inc()
+            else:
+                REQUEST_COUNT.labels(method=method, endpoint=endpoint).inc()
+
+def simulate_users():
+    while True:
+        users = random.randint(100, 1000)
+        ACTIVE_USERS.set(users)
+        time.sleep(30)
+
+def simulate_temperature():
+    while True:
+        temp = random.uniform(40.0, 85.0)
+        TEMPERATURE.set(temp)
+        time.sleep(10)
+
+if __name__ == '__main__':
+    # شروع سرور متریک بر روی پورت 8000
+    start_http_server(8000)
+    
+    print("Custom metrics server started on port 8000")
+    
+    # شروع threadهای شبیه‌سازی
+    threading.Thread(target=simulate_requests, daemon=True).start()
+    threading.Thread(target=simulate_users, daemon=True).start()
+    threading.Thread(target=simulate_temperature, daemon=True).start()
+    
+    # نگه داشتن برنامه در حال اجرا
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopping metrics server...")
+EOF
+
+# ایجاد سرویس برای برنامه متریک
+sudo tee /etc/systemd/system/custom_metrics.service > /dev/null <<'EOF'
+[Unit]
+Description=Custom Metrics Generator
+After=network.target
+
+[Service]
+Type=simple
+User=prometheus
+WorkingDirectory=/opt/monitoring/custom_metrics
+ExecStart=/usr/bin/python3 app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# نصب کتابخانه Python مورد نیاز
+sudo pip3 install prometheus_client
+فاز ۸: راه‌اندازی و تست کامل سیستم
+bash
+# فعال‌سازی و شروع سرویس‌ها
+echo "=== فعال‌سازی سرویس‌ها ==="
+sudo systemctl daemon-reload
+
+sudo systemctl enable prometheus node_exporter alertmanager grafana-server custom_metrics
+sudo systemctl start prometheus node_exporter alertmanager grafana-server custom_metrics
+
+# بررسی وضعیت سرویس‌ها
+echo "=== بررسی وضعیت سرویس‌ها ==="
+sudo systemctl status prometheus --no-pager
+sudo systemctl status node_exporter --no-pager  
+sudo systemctl status alertmanager --no-pager
+sudo systemctl status grafana-server --no-pager
+sudo systemctl status custom_metrics --no-pager
+
+# تست دسترسی به endpointها
+echo "=== تست دسترسی به سرویس‌ها ==="
+curl -s http://localhost:9090/metrics | head -10
+curl -s http://localhost:9100/metrics | head -10
+curl -s http://localhost:8000/metrics | head -10
+curl -s http://localhost:9093 | head -5
+
+# بررسی پورت‌های باز
+echo "=== بررسی پورت‌های فعال ==="
+sudo ss -tulpn | grep -E ':(9090|9100|8000|9093|3000)'
+فاز ۹: ایجاد اسکریپت مانیتورینگ سلامت
+bash
+# ایجاد اسکریپت بررسی سلامت
+echo "=== ایجاد اسکریپت مانیتورینگ سلامت ==="
+sudo tee /opt/monitoring/health_check.sh > /dev/null <<'EOF'
+#!/bin/bash
+
+echo "=== سیستم مانیتورینگ - بررسی سلامت ==="
+echo "زمان: $(date)"
+echo ""
+
+# بررسی سرویس‌ها
+services=("prometheus" "node_exporter" "alertmanager" "grafana-server" "custom_metrics")
+for service in "${services[@]}"; do
+    if systemctl is-active --quiet "$service"; then
+        echo "✅ $service: فعال"
+    else
+        echo "❌ $service: غیرفعال"
+    fi
+done
+
+echo ""
+echo "=== بررسی endpointها ==="
+
+# بررسی endpointهای متریک
+endpoints=("localhost:9090" "localhost:9100" "localhost:8000" "localhost:9093")
+for endpoint in "${endpoints[@]}"; do
+    if curl -s "http://$endpoint" > /dev/null; then
+        echo "✅ $endpoint: در دسترس"
+    else
+        echo "❌ $endpoint: غیرقابل دسترس"
+    fi
+done
+
+echo ""
+echo "=== بررسی متریک‌های کلیدی ==="
+
+# بررسی متریک‌های مهم
+if curl -s http://localhost:9090/api/v1/query?query=up 2>/dev/null | grep -q "data"; then
+    echo "✅ Prometheus API: پاسخ می‌دهد"
+else
+    echo "❌ Prometheus API: مشکل در ارتباط"
+fi
+
+# بررسی uptime سیستم
+UPTIME=$(uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}')
+echo "📊 Uptime سیستم: $UPTIME"
+
+# بررسی استفاده از CPU
+CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
+echo "📊 استفاده CPU: ${CPU_USAGE}%"
+
+# بررسی استفاده از Memory
+MEM_USAGE=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+echo "📊 استفاده Memory: ${MEM_USAGE}%"
+
+echo ""
+echo "=== بررسی آلرت‌های فعال ==="
+ALERTS=$(curl -s http://localhost:9090/api/v1/alerts 2>/dev/null | grep -o '"state":"[^"]*"' | grep -v "inactive" | wc -l)
+echo "🔔 تعداد آلرت‌های فعال: $ALERTS"
+EOF
+
+sudo chmod +x /opt/monitoring/health_check.sh
+فاز ۱۰: پیکربندی فایروال
+bash
+# باز کردن پورت‌های مورد نیاز در فایروال
+echo "=== پیکربندی فایروال ==="
+sudo firewall-cmd --permanent --add-port=9090/tcp  # Prometheus
+sudo firewall-cmd --permanent --add-port=9100/tcp  # Node Exporter  
+sudo firewall-cmd --permanent --add-port=8000/tcp  # Custom Metrics
+sudo firewall-cmd --permanent --add-port=9093/tcp  # Alertmanager
+sudo firewall-cmd --permanent --add-port=3000/tcp  # Grafana
+sudo firewall-cmd --permanent --add-port=8080/tcp  # Web Server (اختیاری)
+sudo firewall-cmd --reload
+
+# نمایش وضعیت فایروال
+sudo firewall-cmd --list-all
+فاز ۱۱: ایجاد گزارش نهایی
+bash
+# ایجاد گزارش نصب
+echo "=== ایجاد گزارش نصب ==="
+sudo tee /opt/monitoring/INSTALL_REPORT.md > /dev/null <<'EOF'
+# گزارش نصب سیستم مانیتورینگ
+
+## ✅ نصب با موفقیت انجام شد
+
+## سرویس‌های راه‌اندازی شده:
+
+### 1. Prometheus
+- **پورت**: 9090
+- **دسترسی**: http://localhost:9090
+- **وظیفه**: جمع‌آوری و ذخیره‌سازی متریک‌ها
+
+### 2. Node Exporter
+- **پورت**: 9100  
+- **دسترسی**: http://localhost:9100/metrics
+- **وظیفه**: جمع‌آوری متریک‌های سیستم
+
+### 3. Alertmanager
+- **پورت**: 9093
+- **دسترسی**: http://localhost:9093
+- **وظیفه**: مدیریت و ارسال اعلان‌ها
+
+### 4. Grafana
+- **پورت**: 3000
+- **دسترسی**: http://localhost:3000
+- **ورودی پیش‌فرض**: admin/admin
+- **وظیفه**: نمایش دشبوردهای مانیتورینگ
+
+### 5. Custom Metrics
+- **پورت**: 8000
+- **دسترسی**: http://localhost:8000/metrics
+- **وظیفه**: تولید متریک‌های تست و شبیه‌سازی
+
+## دستورات مفید:
+
+### بررسی سلامت سیستم:
+```bash
+/opt/monitoring/health_check.sh
+مشاهده لاگ‌ها:
+bash
+sudo journalctl -u prometheus -f
+sudo journalctl -u node_exporter -f
+sudo journalctl -u alertmanager -f
+راه‌اندازی مجدد سرویس‌ها:
+bash
+sudo systemctl restart prometheus node_exporter alertmanager grafana-server
+قدم بعدی:
+به Grafana در آدرس http://localhost:3000 مراجعه کنید
+
+با admin/admin وارد شوید
+
+منبع داده Prometheus را پیکربندی کنید (http://localhost:9090)
+
+دشبوردهای مورد نیاز را import کنید

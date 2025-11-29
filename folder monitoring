@@ -1,0 +1,36 @@
+mkdir -p ~/file_manager/{projects,backups,logs,reports,temp}
+cd ~/file_manager
+for i in {1..10}; do echo "File $i - $(date)" > projects/file_$i.txt; done
+for i in {1..5}; do echo -e "[INFO] App $i start\n[ERROR] DB connection failed\n[WARN] Retrying" > logs/app_$i.log; done
+wc -l projects/*.txt
+file projects/*.txt | head -5
+find . -name "*.txt" -exec du -h {} \; | sort -hr
+grep -r "ERROR" logs/ | head -5
+grep -r "INFO" logs/ | wc -l
+grep -r "WARN" logs/ | cut -d':' -f2 | sort | uniq -c
+echo "Report - Date: $(date)" > reports/report_$(date +%Y%m%d).txt
+echo "Text files: $(find projects -name "*.txt" | wc -l)" >> reports/report_*.txt
+echo "Log files: $(find logs -name "*.log" | wc -l)" >> reports/report_*.txt
+echo "Errors: $(grep -r "ERROR" logs/ | wc -l)" >> reports/report_*.txt
+du -sh . >> reports/report_*.txt
+cat reports/report_*.txt
+tar -czf backups/projects_$(date +%H%M).tar.gz projects/
+tar -czf backups/logs_$(date +%H%M).tar.gz logs/
+ls -lh backups/*.tar.gz
+mkdir -p temp/sorted/
+find projects -name "*.txt" -exec cp {} temp/sorted/ \;
+ls temp/sorted/ | head -5
+rm -rf temp/sorted/file_1*.txt 2>/dev/null
+ls temp/sorted/ | wc -l
+df -h . | head -2
+free -h | head -2
+ps aux --sort=-%cpu | head -5
+cat > file_manager.sh << 'EOF'
+#!/bin/bash
+echo "File Manager:"
+ls -la projects/
+grep -r "ERROR" logs/ 2>/dev/null || echo "No errors found"
+EOF
+chmod +x file_manager.sh
+./file_manager.sh
+echo "Project completed at $(date)"
